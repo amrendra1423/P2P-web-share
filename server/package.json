@@ -1,0 +1,14 @@
+{
+  "name": "p2p-web-share-server",
+  "version": "1.0.0",
+  "description": "Signaling server for P2P Web Share - coordinates WebRTC handshakes, never touches file data",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.18.0"
+  }
+}
