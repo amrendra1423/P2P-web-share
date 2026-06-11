@@ -1,5 +1,11 @@
 # P2P Web Share
 
+## Live demo
+
+- **App (frontend):** https://p2pbrowser.netlify.app
+- **Signaling server (backend):** https://p2p-web-share-05dh.onrender.com
+  (free tier — first load may take ~50 s while it wakes up)
+
 Direct browser-to-browser file transfer over WebRTC. Drop a file, get a share
 link + QR code; anyone who opens the link streams the file straight from your
 browser. The Node.js signaling server only coordinates the WebRTC handshake —
