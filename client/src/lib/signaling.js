@@ -1,29 +1,50 @@
-/** Thin wrapper around the signaling WebSocket. */
+/**
+ * Thin wrapper around the signaling WebSocket with automatic reconnection.
+ * Emits: every server message type, plus '_open' (each (re)connect) and
+ * '_closed' (each disconnect).
+ */
+const RETRY_MS = 2000;
+
 export class Signaling {
   constructor() {
-    this.handlers = new Map(); // msg.type -> Set<fn>
+    this.handlers = new Map(); // type -> Set<fn>
+    this.closed = false;
+    this._resolveReady = null;
+    this.ready = new Promise((res) => (this._resolveReady = res));
+    this._connect();
+  }
+
+  _connect() {
     // VITE_SIGNALING_URL lets the frontend (e.g. on Netlify) reach a
     // signaling server hosted elsewhere (e.g. on Render).
     const base =
       import.meta.env.VITE_SIGNALING_URL ||
       `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
-    this.ws = new WebSocket(`${base.replace(/\/$/, '')}/ws`);
-    this.ready = new Promise((resolve, reject) => {
-      this.ws.onopen = resolve;
-      this.ws.onerror = () => reject(new Error('signaling-failed'));
-    });
-    this.ws.onmessage = (e) => {
+    const ws = new WebSocket(`${base.replace(/\/$/, '')}/ws`);
+    this.ws = ws;
+
+    ws.onopen = () => {
+      this._resolveReady?.();
+      this._resolveReady = null;
+      this._emit('_open', {});
+    };
+    ws.onmessage = (e) => {
       let msg;
       try {
         msg = JSON.parse(e.data);
       } catch {
         return;
       }
-      for (const fn of this.handlers.get(msg.type) ?? []) fn(msg);
+      this._emit(msg.type, msg);
     };
-    this.ws.onclose = () => {
-      for (const fn of this.handlers.get('_closed') ?? []) fn({});
+    ws.onclose = () => {
+      this._emit('_closed', {});
+      if (!this.closed) setTimeout(() => this._connect(), RETRY_MS);
     };
+  }
+
+  _emit(type, msg) {
+    for (const fn of this.handlers.get(type) ?? []) fn(msg);
   }
 
   on(type, fn) {
@@ -32,11 +53,16 @@ export class Signaling {
     return () => this.handlers.get(type).delete(fn);
   }
 
+  get isOpen() {
+    return this.ws.readyState === WebSocket.OPEN;
+  }
+
   send(msg) {
-    if (this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
+    if (this.isOpen) this.ws.send(JSON.stringify(msg));
   }
 
   close() {
+    this.closed = true;
     this.ws.close();
   }
 }

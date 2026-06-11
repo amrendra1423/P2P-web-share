@@ -260,8 +260,29 @@ body {
   background: var(--green);
 }
 
-.dot.connecting {
+.dot.connecting,
+.dot.reconnecting {
   background: #fbbf24;
+}
+
+.dot.reconnecting {
+  animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.badge.e2e {
+  background: #14532d;
+  color: var(--green);
+  font-weight: 600;
+}
+
+.status-paused {
+  color: #fbbf24;
 }
 
 .transfer {

@@ -31,9 +31,11 @@ export default function Sender() {
     addFiles(e.dataTransfer.files);
   };
 
-  const shareUrl = session?.roomId
-    ? `${location.origin}${location.pathname}#${session.roomId}`
-    : null;
+  // Key travels only in the hash — never sent to the server
+  const shareUrl =
+    session?.roomId && session?.keyB64
+      ? `${location.origin}${location.pathname}#${session.roomId}/${session.keyB64}`
+      : null;
 
   const copyLink = async () => {
     try {
@@ -102,7 +104,13 @@ export default function Sender() {
 
       {files.length > 0 && shareUrl && (
         <section className="card share-card">
-          <h2>Share link</h2>
+          <h2>
+            Share link <span className="badge e2e">🔒 end-to-end encrypted</span>
+          </h2>
+          <p className="hint">
+            The decryption key is embedded after the “/” in the link and never
+            reaches the server.
+          </p>
           <div className="share-row">
             <div className="share-link-col">
               <code className="share-url">{shareUrl}</code>

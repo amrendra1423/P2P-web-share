@@ -5,24 +5,35 @@ import {
   RTC_CONFIG,
   waitForDrain,
 } from './protocol.js';
+import { generateKey, encryptChunk } from './crypto.js';
 
 /**
  * SenderSession — hosts a share room.
- * Maintains one RTCPeerConnection + DataChannel per receiver and streams
- * requested files in 64 KB chunks with backpressure.
+ * - One RTCPeerConnection + DataChannel per receiver.
+ * - Every chunk is AES-256-GCM encrypted in-browser before sending
+ *   (zero-knowledge: the key lives only in the URL hash).
+ * - Supports resume: receivers may request a file from a byte offset.
  */
 export class SenderSession {
   constructor(signaling, onUpdate) {
     this.signaling = signaling;
     this.onUpdate = onUpdate;
     this.roomId = null;
+    this.key = null; // CryptoKey (AES-GCM)
+    this.keyB64 = null; // goes into the share URL hash
     this.files = []; // [{ id, file }]
     this.peers = new Map(); // peerId -> peer state
+    this._started = false;
     this._lastNotify = 0;
 
     signaling.on('created', (m) => {
       this.roomId = m.roomId;
       this.notify(true);
+    });
+    // If the signaling socket drops and reconnects, the old room is gone —
+    // recreate one (the share link updates accordingly).
+    signaling.on('_open', () => {
+      if (this._started) this.signaling.send({ type: 'create' });
     });
     signaling.on('peer-joined', (m) => this._onPeerJoined(m.peerId));
     signaling.on('peer-left', (m) => this._dropPeer(m.peerId));
@@ -30,7 +41,11 @@ export class SenderSession {
   }
 
   async start() {
+    const { key, b64 } = await generateKey();
+    this.key = key;
+    this.keyB64 = b64;
     await this.signaling.ready;
+    this._started = true;
     this.signaling.send({ type: 'create' });
   }
 
@@ -68,6 +83,15 @@ export class SenderSession {
   }
 
   async _onPeerJoined(peerId) {
+    // A reconnecting receiver re-joins with the same peerId — replace the
+    // stale connection.
+    const stale = this.peers.get(peerId);
+    if (stale) {
+      try {
+        stale.pc.close();
+      } catch {}
+    }
+
     const pc = new RTCPeerConnection(RTC_CONFIG);
     const channel = pc.createDataChannel('file');
     channel.binaryType = 'arraybuffer';
@@ -78,7 +102,7 @@ export class SenderSession {
       pc,
       channel,
       state: 'connecting',
-      queue: [],
+      queue: [], // [{ fileId, offset }]
       sending: false,
       transfers: new Map(), // fileId -> { sent, total, name, status, speed, _t, _b }
     };
@@ -91,7 +115,8 @@ export class SenderSession {
     };
     pc.onconnectionstatechange = () => {
       if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) {
-        this._dropPeer(peerId);
+        // Only drop if this pc is still the active one for the peer
+        if (this.peers.get(peerId)?.pc === pc) this._dropPeer(peerId);
       }
     };
     channel.onopen = () => {
@@ -103,7 +128,7 @@ export class SenderSession {
       if (typeof e.data !== 'string') return;
       const msg = JSON.parse(e.data);
       if (msg.type === 'request') {
-        peer.queue.push(msg.fileId);
+        peer.queue.push({ fileId: msg.fileId, offset: msg.offset || 0 });
         this._processQueue(peer);
       }
     };
@@ -129,39 +154,50 @@ export class SenderSession {
     if (peer.sending) return;
     peer.sending = true;
     while (peer.queue.length) {
-      await this._sendFile(peer, peer.queue.shift());
+      const { fileId, offset } = peer.queue.shift();
+      await this._sendFile(peer, fileId, offset);
     }
     peer.sending = false;
   }
 
-  async _sendFile(peer, fileId) {
+  async _sendFile(peer, fileId, startOffset = 0) {
     const entry = this.files.find((f) => f.id === fileId);
     const ch = peer.channel;
     if (!entry || ch.readyState !== 'open') return;
     const { file } = entry;
+    if (startOffset > file.size) startOffset = 0;
 
     const t = {
       name: file.name,
-      sent: 0,
+      sent: startOffset,
       total: file.size,
       status: 'sending',
       speed: 0,
       _t: performance.now(),
-      _b: 0,
+      _b: startOffset,
     };
     peer.transfers.set(fileId, t);
 
     ch.send(
-      JSON.stringify({ type: 'file-start', fileId, name: file.name, size: file.size, mime: file.type })
+      JSON.stringify({
+        type: 'file-start',
+        fileId,
+        name: file.name,
+        size: file.size,
+        mime: file.type,
+        offset: startOffset, // resume point (plaintext bytes)
+      })
     );
 
-    let offset = 0;
+    let offset = startOffset;
     try {
       while (offset < file.size) {
         if (ch.readyState !== 'open') throw new Error('channel-closed');
         const chunk = await file.slice(offset, offset + CHUNK_SIZE).arrayBuffer();
+        // Zero-knowledge: encrypt before the chunk ever leaves this browser
+        const encrypted = await encryptChunk(this.key, chunk);
         if (ch.bufferedAmount > HIGH_WATER) await waitForDrain(ch);
-        ch.send(chunk);
+        ch.send(encrypted);
         offset += chunk.byteLength;
         t.sent = offset;
         this._updateSpeed(t);
@@ -171,7 +207,7 @@ export class SenderSession {
       t.status = 'done';
       t.speed = 0;
     } catch {
-      t.status = 'failed';
+      t.status = 'failed'; // receiver will re-request with an offset to resume
       t.speed = 0;
     }
     this.notify(true);

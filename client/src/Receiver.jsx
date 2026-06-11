@@ -7,31 +7,44 @@ import Progress from './components/Progress.jsx';
 const STATUS_TEXT = {
   connecting: 'Connecting to room…',
   waiting: 'Connecting to sender…',
+  reconnecting: 'Connection lost — reconnecting… downloads will resume automatically.',
   'host-left': 'The sender closed the room.',
 };
 
-export default function Receiver({ roomId }) {
+const ERROR_TEXT = {
+  'invalid-link': {
+    title: 'Invalid share link',
+    hint: 'This link is missing its decryption key. Ask the sender to copy the full link.',
+  },
+  default: {
+    title: 'Room not found',
+    hint: "This link may have expired — share rooms only live while the sender's tab is open.",
+  },
+};
+
+export default function Receiver({ roomId, keyB64 }) {
   const sessionRef = useRef(null);
   const [, setTick] = useState(0);
 
   useEffect(() => {
-    const session = new ReceiverSession(new Signaling(), roomId, () => setTick((t) => t + 1));
+    const session = new ReceiverSession(new Signaling(), roomId, keyB64, () =>
+      setTick((t) => t + 1)
+    );
     sessionRef.current = session;
     session.start().catch(console.error);
     return () => session.destroy();
-  }, [roomId]);
+  }, [roomId, keyB64]);
 
   const s = sessionRef.current;
   if (!s) return null;
 
   if (s.state === 'error') {
+    const e = ERROR_TEXT[s.error] ?? ERROR_TEXT.default;
     return (
       <main className="panel">
         <div className="card center">
-          <h2>Room not found</h2>
-          <p className="hint">
-            This link may have expired — share rooms only live while the sender's tab is open.
-          </p>
+          <h2>{e.title}</h2>
+          <p className="hint">{e.hint}</p>
           <a className="btn" href={location.pathname}>
             Share your own files
           </a>
@@ -45,7 +58,16 @@ export default function Receiver({ roomId }) {
       <section className="card">
         <h2>
           Room <code>{roomId}</code>
-          <span className={`dot ${s.state === 'connected' ? 'connected' : 'connecting'}`} />
+          <span className="badge e2e">🔒 encrypted</span>
+          <span
+            className={`dot ${
+              s.state === 'connected'
+                ? 'connected'
+                : s.state === 'reconnecting'
+                ? 'reconnecting'
+                : 'connecting'
+            }`}
+          />
         </h2>
         {s.state !== 'connected' && <p className="hint">{STATUS_TEXT[s.state] ?? s.state}</p>}
 
@@ -78,17 +100,14 @@ export default function Receiver({ roomId }) {
                         <a className="btn" href={t.url} download={f.name}>
                           Save again
                         </a>
+                      ) : t.status === 'paused' ? (
+                        <span className="hint">paused — will resume</span>
                       ) : (
                         <span className="hint">{t.status}…</span>
                       )}
                     </div>
                     {t && t.status !== 'queued' && (
-                      <Progress
-                        done={t.received}
-                        total={t.total}
-                        speed={t.speed}
-                        status={t.status === 'receiving' ? 'receiving' : t.status}
-                      />
+                      <Progress done={t.received} total={t.total} speed={t.speed} status={t.status} />
                     )}
                   </li>
                 );
